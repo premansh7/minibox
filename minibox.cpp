@@ -42,7 +42,7 @@
 namespace fs = std::filesystem;
 using ull = unsigned long long;
 
-static const std::string STATE_DIR = "/run/minibox";  // where running containers are recorded
+static const std::string STATE_DIR = "/run/minibox";  
 static const char *CONTAINER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 // =====================================================================
@@ -57,7 +57,6 @@ static void warn(const std::string &m) { std::cerr << "minibox: warning: " << m 
 
 static std::string errstr(const std::string &what) { return what + ": " + std::strerror(errno); }
 
-// Write a string to an existing file (used for /sys and cgroup control files).
 static bool writeFile(const std::string &path, const std::string &data) {
     int fd = open(path.c_str(), O_WRONLY);
     if (fd < 0) return false;
@@ -75,7 +74,6 @@ static bool readU64File(const std::string &path, ull &v) {
     return true;
 }
 
-// Read "key value" style files such as memory.events or cpu.stat.
 static bool readKey(const std::string &path, const std::string &key, ull &v) {
     std::ifstream f(path);
     std::string k;
@@ -124,11 +122,9 @@ static std::string randomId() {
 static bool isAlive(pid_t pid) { return pid > 0 && (kill(pid, 0) == 0 || errno == EPERM); }
 
 // =====================================================================
-//  Cgroup v2 wrapper (RAII: the cgroup directory is removed automatically)
-// =====================================================================
+
 static std::string cgroupRoot() {
     if (fs::exists("/sys/fs/cgroup/cgroup.controllers")) return "/sys/fs/cgroup";
-    // The system is not using cgroup v2 at the usual place: try our own mount.
     std::string alt = STATE_DIR + "/cgroup";
     std::error_code ec;
     if (!fs::exists(alt + "/cgroup.controllers", ec)) {
@@ -139,7 +135,7 @@ static std::string cgroupRoot() {
 }
 
 static void enableControllers(const std::string &cgroupDir) {
-    for (const char *c : {"+cpu", "+memory", "+pids"})  // one by one: a missing one must not block the rest
+    for (const char *c : {"+cpu", "+memory", "+pids"}) 
         writeFile(cgroupDir + "/cgroup.subtree_control", c);
 }
 
@@ -179,7 +175,7 @@ public:
 
     void remove() {
         if (path_.empty()) return;
-        for (int i = 0; i < 50; i++) {  // the kernel may need a moment after the last process exits
+        for (int i = 0; i < 50; i++) { 
             if (rmdir(path_.c_str()) == 0 || errno == ENOENT) break;
             usleep(100000);
         }
@@ -190,9 +186,7 @@ private:
     std::string path_;
 };
 
-// =====================================================================
-//  Container registry: one small file per running container in /run/minibox
-// =====================================================================
+
 struct Info {
     std::string id, name, cmd, cgroup;
     pid_t pid = 0;
@@ -225,7 +219,6 @@ static bool loadInfo(const std::string &path, Info &i) {
     return !i.id.empty() && i.pid > 0;
 }
 
-// Returns running containers; records of dead containers are cleaned up.
 static std::vector<Info> listContainers() {
     std::vector<Info> out;
     std::error_code ec;
@@ -254,9 +247,6 @@ static bool findContainer(const std::string &ref, Info &out) {
     return false;
 }
 
-// =====================================================================
-//  The container side: runs as PID 1 inside the new namespaces
-// =====================================================================
 struct Options {
     ull memBytes = 0;
     int cpuPercent = 0;
@@ -276,8 +266,7 @@ static bool childErr(const std::string &what) {
     return false;
 }
 
-// Create /dev/null, /dev/zero, ... as real device files (mknod). If the kernel refuses
-// (for example in a restricted sandbox), bind-mount the host's device instead.
+
 static void makeDevices(const std::string &devDir) {
     struct Dev { const char *name; unsigned maj, min; };
     const Dev devs[] = {{"null", 1, 3}, {"zero", 1, 5}, {"full", 1, 7}, {"random", 1, 8}, {"urandom", 1, 9}, {"tty", 5, 0}};
@@ -300,32 +289,29 @@ static void makeDevices(const std::string &devDir) {
 }
 
 static bool setupFilesystem(const std::string &root) {
-    // 1. Mount changes made in here must never leak back to the host.
     if (mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) return childErr("make / private");
-    // 2. pivot_root needs the new root to be a mount point: bind-mount it onto itself.
+
     if (mount(root.c_str(), root.c_str(), nullptr, MS_BIND | MS_REC, nullptr) != 0) return childErr("bind-mount rootfs");
 
     std::error_code ec;
     for (const char *d : {"/proc", "/dev", "/tmp", "/sys", "/root", "/.oldroot"}) fs::create_directories(root + d, ec);
 
-    // 3. /proc shows only this container's processes thanks to the PID namespace.
     if (mount("proc", (root + "/proc").c_str(), "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0)
         return childErr("mount /proc");
-    // 4. A private /dev containing only a handful of safe devices.
+
     if (mount("tmpfs", (root + "/dev").c_str(), "tmpfs", MS_NOSUID, "mode=755,size=64k") != 0) return childErr("mount /dev");
     makeDevices(root + "/dev");
-    // 5. A writable scratch space.
+
     if (mount("tmpfs", (root + "/tmp").c_str(), "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777,size=64m") != 0)
         return childErr("mount /tmp");
 
-    // 6. Switch to the new root and drop every reference to the host filesystem.
     std::string old = root + "/.oldroot";
     if (syscall(SYS_pivot_root, root.c_str(), old.c_str()) == 0) {
         if (chdir("/") != 0) return childErr("chdir /");
         umount2("/.oldroot", MNT_DETACH);
         rmdir("/.oldroot");
     } else {
-        // Some systems (e.g. root on a ramfs) refuse pivot_root; chroot is a weaker fallback.
+
         warn(errstr("pivot_root failed, falling back to chroot") + " (less secure)");
         if (chroot(root.c_str()) != 0 || chdir("/") != 0) return childErr("chroot");
     }
@@ -349,15 +335,14 @@ static void forwardToCommand(int sig) {
     if (g_cmdPid > 0) kill(g_cmdPid, sig);
 }
 
-// Mini "init": as PID 1 we must forward signals to the real command and reap zombies,
-// otherwise `minibox stop` could not terminate the container politely.
+
 static int childMain(void *arg) {
     auto *a = static_cast<ChildArgs *>(arg);
     const Options &o = *a->opt;
 
     close(a->pipeW);
     char go = 0;
-    ssize_t n = read(a->pipeR, &go, 1);  // wait until the parent has put us into the cgroup
+    ssize_t n = read(a->pipeR, &go, 1);  
     close(a->pipeR);
     if (n != 1) return 1;
 
@@ -370,13 +355,13 @@ static int childMain(void *arg) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGHUP, &sa, nullptr);
-    signal(SIGINT, SIG_IGN);  // Ctrl+C reaches the command directly via the terminal
+    signal(SIGINT, SIG_IGN);  
 
     sigset_t block, old;
     sigemptyset(&block);
     sigaddset(&block, SIGTERM);
     sigaddset(&block, SIGHUP);
-    sigprocmask(SIG_BLOCK, &block, &old);  // no signal may slip in before g_cmdPid is set
+    sigprocmask(SIG_BLOCK, &block, &old);  
 
     pid_t cmd = fork();
     if (cmd < 0) return childErr("fork") ? 0 : 1;
@@ -403,7 +388,7 @@ static int childMain(void *arg) {
     int code = 0;
     for (;;) {
         int st = 0;
-        pid_t w = waitpid(-1, &st, 0);  // reaps the command AND any orphaned grandchildren
+        pid_t w = waitpid(-1, &st, 0);  
         if (w < 0) {
             if (errno == EINTR) continue;
             break;
@@ -413,12 +398,10 @@ static int childMain(void *arg) {
             break;
         }
     }
-    return code;  // when PID 1 exits, the kernel kills everything left in the namespace
+    return code;  
 }
 
-// =====================================================================
-//  Command: run
-// =====================================================================
+
 static volatile pid_t g_child = 0;
 static void forwardToChild(int sig) {
     if (g_child > 0) kill(g_child, sig);
@@ -462,7 +445,6 @@ static int cmdRun(const std::vector<std::string> &args) {
     for (auto &c : listContainers())
         if (c.name == o.name) fail("a container named '" + o.name + "' is already running");
 
-    // --- cgroup with the requested limits ---
     Cgroup cg(id);
     if (o.memBytes) {
         cg.limit("memory.max", std::to_string(o.memBytes), "memory");
@@ -478,7 +460,7 @@ static int cmdRun(const std::vector<std::string> &args) {
     void *stack = mmap(nullptr, STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (stack == MAP_FAILED) fail(errstr("mmap"));
 
-    signal(SIGINT, SIG_IGN);  // Ctrl+C is for the command inside the container
+    signal(SIGINT, SIG_IGN); 
     signal(SIGTERM, forwardToChild);
     signal(SIGHUP, forwardToChild);
 
@@ -520,7 +502,7 @@ static int cmdRun(const std::vector<std::string> &args) {
     std::cerr << "[minibox] container " << id << " exited with code " << code;
     if (oom > 0) std::cerr << "  (killed by the out-of-memory limit)";
     std::cerr << "\n";
-    return code;  // the Cgroup destructor now removes the cgroup directory
+    return code; 
 }
 
 // =====================================================================
@@ -560,7 +542,7 @@ static int cmdStop(const std::vector<std::string> &args) {
     if (!findContainer(ref, c)) fail("no running container '" + ref + "'");
 
     std::cerr << "[minibox] stopping " << c.id << " (" << c.name << ") ...\n";
-    kill(c.pid, SIGTERM);  // PID 1 of the container forwards this to the command
+    kill(c.pid, SIGTERM);  
     if (!waitGone(c.pid, timeout * 1000)) {
         std::cerr << "[minibox] did not stop in " << timeout << "s, sending SIGKILL\n";
         kill(c.pid, SIGKILL);
@@ -613,7 +595,7 @@ static Sample takeSample(const Info &c) {
     auto pids = cgroupPids(c.cgroup);
     s.pids = pids.size();
     ull v;
-    // Prefer the kernel's own accounting; fall back to /proc if a controller is not enabled.
+
     if (readU64File(c.cgroup + "/memory.current", v)) s.mem = v;
     else for (pid_t p : pids) s.mem += procRssBytes(p);
     if (readU64File(c.cgroup + "/memory.max", v)) s.memMax = v;
