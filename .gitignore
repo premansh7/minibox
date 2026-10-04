@@ -1,0 +1,25 @@
+# Build output
+/minibox
+
+# Generated container root filesystem
+/rootfs/
+
+# Runtime state / local artifacts
+*.info
+*.log
+/run/
+/tmp/
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local build/debug files
+*.o
+*.out
+core
+core.*
